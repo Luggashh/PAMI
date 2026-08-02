@@ -18,8 +18,8 @@ UNCERTAINTY_SAMPLES = 5
 AGREEMENT_THRESHOLD = 4
 
 # ── Dataset Settings ─────────────────────────────────────────────
-GSM8K_SPLIT = "test"
-NUM_EXAMPLES = 50
+GSM8K_SPLIT = "train"
+NUM_EXAMPLES = 800
 
 # ── Output ───────────────────────────────────────────────────────
 OUTPUT_DIR = "results"
