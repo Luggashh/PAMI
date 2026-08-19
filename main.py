@@ -15,12 +15,21 @@ from evaluation import evaluate_results
 
 def setup_ollama():
     """Starts Ollama in the background and ensures the model is pulled."""
-    print("🚀 Starting Ollama server...")
-    subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    import os
+    import subprocess
+    import time
+    
+    print("🚀 Starting Ollama server on port 11435...")
+    
+    # Copy current environment variables and force the port to 11435
+    env = os.environ.copy()
+    env["OLLAMA_HOST"] = "127.0.0.1:11435"
+    
+    subprocess.Popen(["ollama", "serve"], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     time.sleep(3) 
     
-    print(f"📥 Verifying model '{MODEL_NAME}' is pulled...")
-    subprocess.run(["ollama", "pull", MODEL_NAME], check=True)
+    print("📥 Verifying model 'llama3.2:3b' is pulled...")
+    subprocess.run(["ollama", "pull", "llama3.2:3b"], env=env, check=True)
 
 def main():
     parser = argparse.ArgumentParser(description="Iterative Audit Loops (GSM8K)")
