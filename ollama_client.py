@@ -1,7 +1,7 @@
 import requests
 import time
 
-def generate(prompt, system_prompt=None, seed=42, timeout=300, **kwargs):
+def generate(prompt, system_prompt=None, seed=42, timeout=600, **kwargs):
     """
     Extrem robuste Generierungsfunktion für den 100+ Fragen Großrechenlauf.
     Verhindert Abstürze durch automatisches Retry bei Timeouts.
