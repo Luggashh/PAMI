@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+
+# Runtime logs
+*.log
+results/logs/
+
+# Full chain-of-thought traces + checkpoint — too large for git.
+# The scored reports in results/ (solutions.jsonl, summary.*, per_example.csv,
+# baseline_vs_audit_comparison.md) are kept.
+results/all_results.jsonl
+results/all_results.jsonl.bak
