@@ -43,7 +43,10 @@ OLLAMA_INSTALL_DIR = os.path.expanduser("~/.local/ollama")
 OLLAMA_MODELS_DIR = os.environ.get(
     "OLLAMA_MODELS", os.path.expanduser("~/.ollama/models")
 )
-OLLAMA_DOWNLOAD_URL = "https://ollama.com/download/ollama-linux-amd64.tgz"
+# Ollama ships releases as `.tar.zst` (older versions used `.tgz`); the
+# installer probes both. Set PAMI_OLLAMA_URL to pin an exact archive.
+OLLAMA_DOWNLOAD_URL = os.environ.get("PAMI_OLLAMA_URL", "")
+OLLAMA_DOWNLOAD_BASE = "https://ollama.com/download"
 
 # ── Request handling ─────────────────────────────────────────────
 REQUEST_TIMEOUT = 600

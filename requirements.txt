@@ -1,4 +1,7 @@
 requests>=2.31.0
+# Only needed to unpack Ollama's .tar.zst release on Python < 3.14,
+# which lacks native zstd support in `tarfile`.
+zstandard>=0.22.0; python_version < "3.14"
 datasets>=2.14.0
 tqdm>=4.66.0
 pandas>=2.0.0

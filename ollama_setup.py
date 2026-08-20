@@ -12,6 +12,7 @@ Responsibilities:
 
 import atexit
 import os
+import platform
 import shutil
 import socket
 import subprocess
@@ -19,13 +20,15 @@ import sys
 import tarfile
 import tempfile
 import time
-import urllib.request
+
+import requests
 
 from config import (
     MODEL_NAME,
     NUM_PARALLEL_PER_SERVER,
     NUM_SERVERS,
     OLLAMA_BASE_PORT,
+    OLLAMA_DOWNLOAD_BASE,
     OLLAMA_DOWNLOAD_URL,
     OLLAMA_HOST,
     OLLAMA_INSTALL_DIR,
@@ -45,26 +48,120 @@ def _local_binary() -> str | None:
     return candidate if os.path.isfile(candidate) else None
 
 
+def _archive_name() -> str:
+    """Release asset base name for this machine's architecture."""
+    machine = platform.machine().lower()
+    arch = "arm64" if machine in ("aarch64", "arm64") else "amd64"
+    return f"ollama-linux-{arch}"
+
+
+def resolve_download_url() -> str:
+    """
+    Pick the release archive to download.
+
+    Ollama moved from `.tgz` to `.tar.zst`; probe both so the pipeline keeps
+    working across that change in either direction.
+    """
+    if OLLAMA_DOWNLOAD_URL:
+        return OLLAMA_DOWNLOAD_URL
+
+    base = _archive_name()
+    candidates = [
+        f"{OLLAMA_DOWNLOAD_BASE}/{base}.tar.zst",
+        f"{OLLAMA_DOWNLOAD_BASE}/{base}.tgz",
+    ]
+    for url in candidates:
+        try:
+            response = requests.head(url, allow_redirects=True, timeout=30)
+            if response.status_code == 200:
+                return url
+        except requests.exceptions.RequestException:
+            continue
+
+    raise RuntimeError(
+        "Could not find a downloadable Ollama archive. Tried:\n  "
+        + "\n  ".join(candidates)
+        + "\nSet PAMI_OLLAMA_URL to a working archive URL to override."
+    )
+
+
 def _download(url: str, dest: str) -> None:
-    """Download `url` to `dest` with a coarse progress indicator."""
-    with urllib.request.urlopen(url) as response, open(dest, "wb") as out:
+    """Stream `url` to `dest` with a coarse progress indicator."""
+    with requests.get(url, stream=True, timeout=(30, 300)) as response:
+        response.raise_for_status()
         total = int(response.headers.get("Content-Length") or 0)
         read = 0
         last_pct = -1
-        while True:
-            chunk = response.read(1 << 20)
-            if not chunk:
-                break
-            out.write(chunk)
-            read += len(chunk)
-            if total:
-                pct = int(read * 100 / total)
-                if pct != last_pct and pct % 5 == 0:
-                    print(f"   {pct:3d}%  ({read / 1e9:.2f} / {total / 1e9:.2f} GB)")
-                    last_pct = pct
-            elif read % (256 << 20) < (1 << 20):
-                print(f"   {read / 1e9:.2f} GB")
-    print("   download complete.")
+        with open(dest, "wb") as out:
+            for chunk in response.iter_content(chunk_size=1 << 20):
+                if not chunk:
+                    continue
+                out.write(chunk)
+                read += len(chunk)
+                if total:
+                    pct = int(read * 100 / total)
+                    if pct != last_pct and pct % 5 == 0:
+                        print(f"   {pct:3d}%  ({read / 1e9:.2f} / {total / 1e9:.2f} GB)", flush=True)
+                        last_pct = pct
+                elif read % (256 << 20) < (1 << 20):
+                    print(f"   {read / 1e9:.2f} GB", flush=True)
+    print("   Download complete.")
+
+
+def _extract(archive: str, dest_dir: str) -> None:
+    """
+    Unpack a `.tgz` or `.tar.zst` release archive.
+
+    The official install.sh requires the `zstd` CLI, which needs root to
+    install on most distros. Python 3.14+ decompresses zstd natively, and the
+    pip-installable `zstandard` module covers older interpreters — so no root
+    is needed either way.
+    """
+    print("   Extracting (this includes the bundled CUDA runtime)...", flush=True)
+
+    def _unpack(fileobj_or_path, mode):
+        with tarfile.open(**fileobj_or_path, mode=mode) as tar:
+            try:
+                tar.extractall(dest_dir, filter="tar")
+            except TypeError:  # Python < 3.11.4 has no extraction filters
+                tar.extractall(dest_dir)
+
+    if archive.endswith(".tgz") or archive.endswith(".tar.gz"):
+        _unpack({"name": archive}, "r:gz")
+        return
+
+    # 1. Native zstd support (Python 3.14+, if built against libzstd).
+    try:
+        _unpack({"name": archive}, "r:zst")
+        return
+    except (tarfile.CompressionError, ImportError, ValueError):
+        pass
+
+    # 2. The `zstandard` pip module.
+    try:
+        import zstandard
+
+        with open(archive, "rb") as raw:
+            reader = zstandard.ZstdDecompressor().stream_reader(raw)
+            _unpack({"fileobj": reader}, "r|")
+        return
+    except ImportError:
+        pass
+
+    # 3. A `zstd` binary on PATH (conda envs usually ship one).
+    zstd_bin = shutil.which("zstd") or shutil.which("unzstd")
+    if zstd_bin:
+        decompressed = archive[: -len(".zst")]
+        subprocess.run([zstd_bin, "-d", "-f", archive, "-o", decompressed], check=True)
+        _unpack({"name": decompressed}, "r:")
+        os.remove(decompressed)
+        return
+
+    raise RuntimeError(
+        "Cannot decompress a .tar.zst archive: this Python has no zstd support, "
+        "the `zstandard` module is not installed, and no `zstd` binary is on PATH.\n"
+        "Fix with:  pip install zstandard"
+    )
 
 
 def install_ollama_userspace() -> str:
@@ -76,22 +173,23 @@ def install_ollama_userspace() -> str:
     print(f"📦 Installing Ollama into {OLLAMA_INSTALL_DIR} (no sudo required)...")
     os.makedirs(OLLAMA_INSTALL_DIR, exist_ok=True)
 
-    with tempfile.TemporaryDirectory() as tmp:
-        archive = os.path.join(tmp, "ollama-linux-amd64.tgz")
-        print(f"   Downloading {OLLAMA_DOWNLOAD_URL}")
-        _download(OLLAMA_DOWNLOAD_URL, archive)
+    url = resolve_download_url()
 
-        print("   Extracting (this includes the bundled CUDA runtime)...")
-        with tarfile.open(archive, "r:gz") as tar:
-            try:
-                tar.extractall(OLLAMA_INSTALL_DIR, filter="tar")
-            except TypeError:  # Python < 3.11.4 has no extraction filters
-                tar.extractall(OLLAMA_INSTALL_DIR)
+    # Stage the ~1.5 GB download next to the install dir, not in /tmp, which is
+    # often small or quota-limited on shared cluster nodes.
+    staging = os.path.dirname(os.path.abspath(OLLAMA_INSTALL_DIR))
+    os.makedirs(staging, exist_ok=True)
+
+    with tempfile.TemporaryDirectory(dir=staging) as tmp:
+        archive = os.path.join(tmp, os.path.basename(url))
+        print(f"   Downloading {url}", flush=True)
+        _download(url, archive)
+        _extract(archive, OLLAMA_INSTALL_DIR)
 
     binary = os.path.join(OLLAMA_INSTALL_DIR, "bin", "ollama")
     if not os.path.isfile(binary):
         raise RuntimeError(
-            f"Ollama tarball extracted but no binary at {binary}. "
+            f"Ollama archive extracted but no binary at {binary}. "
             f"Contents: {os.listdir(OLLAMA_INSTALL_DIR)}"
         )
     os.chmod(binary, 0o755)
